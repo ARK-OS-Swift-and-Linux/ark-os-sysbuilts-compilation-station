@@ -116,41 +116,41 @@ jobs:
           # Replace hardcoded musl-gcc wrapper with a relocatable wrapper
           echo "=== Creating relocatable musl-gcc wrapper ==="
           cat << 'EOF' > "$SYSROOT/bin/musl-gcc"
-#!/bin/sh
-set -e
-BINDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-SYSROOT="$(CDPATH= cd -- "$BINDIR/.." && pwd -P)"
-SPECFILE="$SYSROOT/lib/musl-gcc.specs"
+          #!/bin/sh
+          set -e
+          BINDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+          SYSROOT="$(CDPATH= cd -- "$BINDIR/.." && pwd -P)"
+          SPECFILE="$SYSROOT/lib/musl-gcc.specs"
 
-if [ ! -f "$SPECFILE" ] || ! grep -Fq "$SYSROOT/include" "$SPECFILE" 2>/dev/null; then
-    cat << SPECEOF > "$SPECFILE"
-%rename cpp_options old_cpp_options
+          if [ ! -f "$SPECFILE" ] || ! grep -Fq "$SYSROOT/include" "$SPECFILE" 2>/dev/null; then
+              cat << SPECEOF > "$SPECFILE"
+          %rename cpp_options old_cpp_options
 
-*cpp_options:
--nostdinc -isystem $SYSROOT/include -isystem include%s %(old_cpp_options)
+          *cpp_options:
+          -nostdinc -isystem $SYSROOT/include -isystem include%s %(old_cpp_options)
 
-*cc1:
-%(cc1_cpu) -nostdinc -isystem $SYSROOT/include -isystem include%s
+          *cc1:
+          %(cc1_cpu) -nostdinc -isystem $SYSROOT/include -isystem include%s
 
-*link_libgcc:
--L$SYSROOT/lib -L .%s
+          *link_libgcc:
+          -L$SYSROOT/lib -L .%s
 
-*libgcc:
-libgcc.a%s %:if-exists(libgcc_eh.a%s)
+          *libgcc:
+          libgcc.a%s %:if-exists(libgcc_eh.a%s)
 
-*startfile:
-%{!shared: $SYSROOT/lib/Scrt1.o} $SYSROOT/lib/crti.o crtbeginS.o%s
+          *startfile:
+          %{!shared: $SYSROOT/lib/Scrt1.o} $SYSROOT/lib/crti.o crtbeginS.o%s
 
-*endfile:
-crtendS.o%s $SYSROOT/lib/crtn.o
+          *endfile:
+          crtendS.o%s $SYSROOT/lib/crtn.o
 
-*link:
--dynamic-linker /lib/ld-musl-x86_64.so.1 -nostdlib %{shared:-shared} %{static:-static} %{rdynamic:-export-dynamic}
-SPECEOF
-fi
+          *link:
+          -dynamic-linker /lib/ld-musl-x86_64.so.1 -nostdlib %{shared:-shared} %{static:-static} %{rdynamic:-export-dynamic}
+          SPECEOF
+          fi
 
-exec "${REALGCC:-gcc}" "$@" -specs "$SPECFILE"
-EOF
+          exec "${REALGCC:-gcc}" "$@" -specs "$SPECFILE"
+          EOF
           chmod +x "$SYSROOT/bin/musl-gcc"
           echo "Musl installed successfully into $SYSROOT."
 
@@ -212,36 +212,36 @@ EOF
           # Smoke-test relocatable musl-gcc and prove allocator interception
           echo "=== Testing relocatable musl-gcc and allocator interception ==="
           cat << 'EOF' > "$SYSROOT/test_smoke.c"
-#include <stdio.h>
-#include <stdlib.h>
-#include <mimalloc.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <mimalloc.h>
 
-int main(void) {
-    /* 1. Explicit mimalloc call */
-    void* p1 = mi_malloc(64);
-    if (!p1 || !mi_is_in_heap_region(p1)) {
-        fprintf(stderr, "Error: mi_malloc failed or address not in mimalloc heap!\n");
-        return 1;
-    }
-    mi_free(p1);
+          int main(void) {
+              /* 1. Explicit mimalloc call */
+              void* p1 = mi_malloc(64);
+              if (!p1 || !mi_is_in_heap_region(p1)) {
+                  fprintf(stderr, "Error: mi_malloc failed or address not in mimalloc heap!\n");
+                  return 1;
+              }
+              mi_free(p1);
 
-    /* 2. Standard libc malloc override check */
-    void* p2 = malloc(128);
-    if (!p2) {
-        fprintf(stderr, "Error: standard malloc failed!\n");
-        return 2;
-    }
-    if (!mi_is_in_heap_region(p2)) {
-        fprintf(stderr, "Error: standard malloc was NOT intercepted by mimalloc!\n");
-        free(p2);
-        return 3;
-    }
-    free(p2);
+              /* 2. Standard libc malloc override check */
+              void* p2 = malloc(128);
+              if (!p2) {
+                  fprintf(stderr, "Error: standard malloc failed!\n");
+                  return 2;
+              }
+              if (!mi_is_in_heap_region(p2)) {
+                  fprintf(stderr, "Error: standard malloc was NOT intercepted by mimalloc!\n");
+                  free(p2);
+                  return 3;
+              }
+              free(p2);
 
-    printf("Sysroot smoke test: relocatable musl-gcc and allocator interception PASSED\n");
-    return 0;
-}
-EOF
+              printf("Sysroot smoke test: relocatable musl-gcc and allocator interception PASSED\n");
+              return 0;
+          }
+          EOF
           "$SYSROOT/bin/musl-gcc" -static "$SYSROOT/lib/mimalloc.o" "$SYSROOT/test_smoke.c" -o "$SYSROOT/test_smoke"
           test -x "$SYSROOT/test_smoke" || { echo "musl-gcc smoke test compilation failed"; exit 1; }
           "$SYSROOT/test_smoke" || { echo "musl-gcc allocator interception verification failed"; exit 1; }
@@ -250,22 +250,22 @@ EOF
 
           # Record provenance metadata
           cat <<EOF > "$SYSROOT/sysbuilts-metadata.json"
-{
-  "target": "x86_64-unknown-linux-musl",
-  "musl": {
-    "repository": "https://git.musl-libc.org/git/musl",
-    "tag": "${{ steps.version_check.outputs.musl_tag }}",
-    "commit": "${{ steps.build_musl.outputs.musl_commit }}"
-  },
-  "mimalloc": {
-    "repository": "https://github.com/microsoft/mimalloc.git",
-    "tag": "${{ steps.version_check.outputs.mimalloc_tag }}",
-    "commit": "${{ steps.build_mimalloc.outputs.mimalloc_commit }}"
-  },
-  "release_tag": "${{ steps.version_check.outputs.release_tag }}",
-  "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-EOF
+          {
+            "target": "x86_64-unknown-linux-musl",
+            "musl": {
+              "repository": "https://github.com/kraj/musl.git",
+              "tag": "${{ steps.version_check.outputs.musl_tag }}",
+              "commit": "${{ steps.build_musl.outputs.musl_commit }}"
+            },
+            "mimalloc": {
+              "repository": "https://github.com/microsoft/mimalloc.git",
+              "tag": "${{ steps.version_check.outputs.mimalloc_tag }}",
+              "commit": "${{ steps.build_mimalloc.outputs.mimalloc_commit }}"
+            },
+            "release_tag": "${{ steps.version_check.outputs.release_tag }}",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
 
           echo "${{ steps.version_check.outputs.release_tag }}" > "$SYSROOT/version.txt"
           echo "Sysroot validation complete."
