@@ -1,0 +1,21 @@
+# Build artifacts and directories
+build/
+dist/
+release-assets/
+release-parts/
+
+# Archives and binaries
+*.tar.gz
+*.tar.xz
+*.tar
+*.o
+*.a
+*.so
+*.so.*
+
+# Cloned upstream sources
+musl-src/
+mimalloc-src/
+
+# OS metadata
+.DS_Store
