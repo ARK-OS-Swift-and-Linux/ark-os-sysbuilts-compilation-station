@@ -87,8 +87,8 @@ jobs:
         run: |
           MUSL_TAG="${{ steps.version_check.outputs.musl_tag }}"
           echo "=== Cloning official musl libc ($MUSL_TAG) ==="
-          git clone --depth 1 --branch "$MUSL_TAG" https://github.com/kraj/musl.git kraj/master
-          MUSL_COMMIT=$(git -C kraj/master rev-parse HEAD)
+          git clone --depth 1 --branch "$MUSL_TAG" https://github.com/kraj/musl.git musl-src
+          MUSL_COMMIT=$(git -C musl-src rev-parse HEAD)
           echo "musl_commit=$MUSL_COMMIT" >> $GITHUB_OUTPUT
 
           mkdir -p dist/sysroot
