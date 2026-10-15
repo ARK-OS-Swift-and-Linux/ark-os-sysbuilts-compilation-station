@@ -2,16 +2,16 @@ name: Sysbuilts Compilation Station (musl + mimalloc)
 
 on:
   schedule:
-    # Run weekly on Sunday at midnight UTC to check for upstream updates
+    # Run weekly on Sunday at midnight UTC to verify build integrity
     - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       musl_tag:
-        description: 'musl libc git tag or branch (e.g., v1.2.5; leave empty for latest stable)'
+        description: 'musl libc git tag (default: v1.2.5)'
         required: false
         default: 'v1.2.5'
       mimalloc_tag:
-        description: 'mimalloc git tag or branch (e.g., v2.1.9; leave empty for latest release)'
+        description: 'mimalloc git tag (default: v2.1.9)'
         required: false
         default: 'v2.1.9'
       force:
@@ -25,7 +25,6 @@ on:
       - master
     paths:
       - '.github/workflows/compile-sysbuilts.yml'
-      - 'scripts/**'
 
 permissions:
   contents: write
@@ -45,23 +44,12 @@ jobs:
           INPUT_MIMALLOC: ${{ inputs.mimalloc_tag }}
           FORCE_BUILD: ${{ inputs.force }}
         run: |
-          # 1. Determine musl version
-          if [ -n "$INPUT_MUSL" ]; then
-            MUSL_VER="$INPUT_MUSL"
-          else
-            echo "Querying latest tag for musl libc..."
-            MUSL_VER=$(git ls-remote --tags --refs https://github.com/bminor/musl.git 'v1.*' | awk -F'/' '{print $3}' | sort -V | tail -n1)
-            [ -z "$MUSL_VER" ] && MUSL_VER="v1.2.5"
-          fi
+          # Pinned default release versions to ensure reproducible provenance
+          DEFAULT_MUSL_TAG="v1.2.5"
+          DEFAULT_MIMALLOC_TAG="v2.1.9"
 
-          # 2. Determine mimalloc version
-          if [ -n "$INPUT_MIMALLOC" ]; then
-            MIMALLOC_VER="$INPUT_MIMALLOC"
-          else
-            echo "Querying latest tag for mimalloc..."
-            MIMALLOC_VER=$(git ls-remote --tags --refs https://github.com/microsoft/mimalloc.git 'v2.*' | awk -F'/' '{print $3}' | sort -V | tail -n1)
-            [ -z "$MIMALLOC_VER" ] && MIMALLOC_VER="v2.1.9"
-          fi
+          MUSL_VER="${INPUT_MUSL:-$DEFAULT_MUSL_TAG}"
+          MIMALLOC_VER="${INPUT_MIMALLOC:-$DEFAULT_MIMALLOC_TAG}"
 
           RELEASE_TAG="sysbuilts-${MUSL_VER}-${MIMALLOC_VER}"
           echo "Selected musl:     $MUSL_VER"
@@ -94,11 +82,14 @@ jobs:
             xz-utils
 
       - name: Clone and Compile musl libc
+        id: build_musl
         if: steps.version_check.outputs.should_build == 'true'
         run: |
           MUSL_TAG="${{ steps.version_check.outputs.musl_tag }}"
-          echo "=== Cloning musl libc ($MUSL_TAG) ==="
-          git clone --depth 1 --branch "$MUSL_TAG" https://github.com/bminor/musl.git musl-src
+          echo "=== Cloning official musl libc ($MUSL_TAG) ==="
+          git clone --depth 1 --branch "$MUSL_TAG" https://github.com/kraj/musl.git kraj/master
+          MUSL_COMMIT=$(git -C musl-src rev-parse HEAD)
+          echo "musl_commit=$MUSL_COMMIT" >> $GITHUB_OUTPUT
 
           mkdir -p dist/sysroot
           SYSROOT="$(pwd)/dist/sysroot"
@@ -117,34 +108,80 @@ jobs:
           make DESTDIR="$SYSROOT" install
           cd ..
 
-          # Create conventional usr/lib and usr/include symlinks if missing
+          # Create conventional usr/lib and usr/include symlinks
           mkdir -p "$SYSROOT/usr"
           [ ! -d "$SYSROOT/usr/include" ] && ln -sf ../include "$SYSROOT/usr/include"
           [ ! -d "$SYSROOT/usr/lib" ] && ln -sf ../lib "$SYSROOT/usr/lib"
 
+          # Replace hardcoded musl-gcc wrapper with a relocatable wrapper
+          echo "=== Creating relocatable musl-gcc wrapper ==="
+          cat << 'EOF' > "$SYSROOT/bin/musl-gcc"
+#!/bin/sh
+set -e
+BINDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+SYSROOT="$(CDPATH= cd -- "$BINDIR/.." && pwd -P)"
+SPECFILE="$SYSROOT/lib/musl-gcc.specs"
+
+if [ ! -f "$SPECFILE" ] || ! grep -Fq "$SYSROOT/include" "$SPECFILE" 2>/dev/null; then
+    cat << SPECEOF > "$SPECFILE"
+%rename cpp_options old_cpp_options
+
+*cpp_options:
+-nostdinc -isystem $SYSROOT/include -isystem include%s %(old_cpp_options)
+
+*cc1:
+%(cc1_cpu) -nostdinc -isystem $SYSROOT/include -isystem include%s
+
+*link_libgcc:
+-L$SYSROOT/lib -L .%s
+
+*libgcc:
+libgcc.a%s %:if-exists(libgcc_eh.a%s)
+
+*startfile:
+%{!shared: $SYSROOT/lib/Scrt1.o} $SYSROOT/lib/crti.o crtbeginS.o%s
+
+*endfile:
+crtendS.o%s $SYSROOT/lib/crtn.o
+
+*link:
+-dynamic-linker /lib/ld-musl-x86_64.so.1 -nostdlib %{shared:-shared} %{static:-static} %{rdynamic:-export-dynamic}
+SPECEOF
+fi
+
+exec "${REALGCC:-gcc}" "$@" -specs "$SPECFILE"
+EOF
+          chmod +x "$SYSROOT/bin/musl-gcc"
           echo "Musl installed successfully into $SYSROOT."
 
       - name: Clone and Compile mimalloc
+        id: build_mimalloc
         if: steps.version_check.outputs.should_build == 'true'
         run: |
           MIMALLOC_TAG="${{ steps.version_check.outputs.mimalloc_tag }}"
-          echo "=== Cloning mimalloc ($MIMALLOC_TAG) ==="
+          echo "=== Cloning official mimalloc ($MIMALLOC_TAG) ==="
           git clone --depth 1 --branch "$MIMALLOC_TAG" https://github.com/microsoft/mimalloc.git mimalloc-src
+          MIMALLOC_COMMIT=$(git -C mimalloc-src rev-parse HEAD)
+          echo "mimalloc_commit=$MIMALLOC_COMMIT" >> $GITHUB_OUTPUT
 
           SYSROOT="$(pwd)/dist/sysroot"
           mkdir -p mimalloc-src/build
           cd mimalloc-src/build
 
           echo "=== Configuring mimalloc for musl target ==="
-          # Use cmake with musl-gcc wrapper generated by our sysroot
-          CC="$SYSROOT/bin/musl-gcc" CFLAGS="-I$SYSROOT/include" cmake .. \
+          # Use cmake with the relocatable musl-gcc wrapper and top-level installation
+          CC="$SYSROOT/bin/musl-gcc" cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DMI_BUILD_SHARED=ON \
             -DMI_BUILD_STATIC=ON \
             -DMI_BUILD_OBJECT=ON \
             -DMI_BUILD_TESTS=OFF \
             -DMI_OVERRIDE=ON \
-            -DCMAKE_INSTALL_PREFIX=/
+            -DMI_LIBC_MUSL=ON \
+            -DMI_INSTALL_TOPLEVEL=ON \
+            -DCMAKE_INSTALL_PREFIX=/ \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_INSTALL_INCLUDEDIR=include
 
           echo "=== Compiling mimalloc ==="
           make -j"$(nproc)"
@@ -155,7 +192,7 @@ jobs:
 
           echo "mimalloc installed successfully into $SYSROOT."
 
-      - name: Validate Sysroot & Generate Metadata
+      - name: Validate Sysroot & Generate Provenance Metadata
         if: steps.version_check.outputs.should_build == 'true'
         run: |
           SYSROOT="$(pwd)/dist/sysroot"
@@ -169,31 +206,81 @@ jobs:
           test -f "$SYSROOT/lib/crt1.o" || { echo "Missing crt1.o"; exit 1; }
           test -f "$SYSROOT/lib/libmimalloc.a" || { echo "Missing libmimalloc.a"; exit 1; }
           test -f "$SYSROOT/lib/libmimalloc.so" || { echo "Missing libmimalloc.so"; exit 1; }
+          test -f "$SYSROOT/lib/mimalloc.o" || { echo "Missing mimalloc.o object"; exit 1; }
+          test -x "$SYSROOT/bin/musl-gcc" || { echo "Missing executable musl-gcc"; exit 1; }
 
-          # Record version metadata
+          # Smoke-test relocatable musl-gcc and prove allocator interception
+          echo "=== Testing relocatable musl-gcc and allocator interception ==="
+          cat << 'EOF' > "$SYSROOT/test_smoke.c"
+#include <stdio.h>
+#include <stdlib.h>
+#include <mimalloc.h>
+
+int main(void) {
+    /* 1. Explicit mimalloc call */
+    void* p1 = mi_malloc(64);
+    if (!p1 || !mi_is_in_heap_region(p1)) {
+        fprintf(stderr, "Error: mi_malloc failed or address not in mimalloc heap!\n");
+        return 1;
+    }
+    mi_free(p1);
+
+    /* 2. Standard libc malloc override check */
+    void* p2 = malloc(128);
+    if (!p2) {
+        fprintf(stderr, "Error: standard malloc failed!\n");
+        return 2;
+    }
+    if (!mi_is_in_heap_region(p2)) {
+        fprintf(stderr, "Error: standard malloc was NOT intercepted by mimalloc!\n");
+        free(p2);
+        return 3;
+    }
+    free(p2);
+
+    printf("Sysroot smoke test: relocatable musl-gcc and allocator interception PASSED\n");
+    return 0;
+}
+EOF
+          "$SYSROOT/bin/musl-gcc" -static "$SYSROOT/lib/mimalloc.o" "$SYSROOT/test_smoke.c" -o "$SYSROOT/test_smoke"
+          test -x "$SYSROOT/test_smoke" || { echo "musl-gcc smoke test compilation failed"; exit 1; }
+          "$SYSROOT/test_smoke" || { echo "musl-gcc allocator interception verification failed"; exit 1; }
+          rm -f "$SYSROOT/test_smoke.c" "$SYSROOT/test_smoke"
+          echo "musl-gcc smoke test passed."
+
+          # Record provenance metadata
           cat <<EOF > "$SYSROOT/sysbuilts-metadata.json"
-          {
-            "target": "x86_64-unknown-linux-musl",
-            "musl_version": "${{ steps.version_check.outputs.musl_tag }}",
-            "mimalloc_version": "${{ steps.version_check.outputs.mimalloc_tag }}",
-            "release_tag": "${{ steps.version_check.outputs.release_tag }}",
-            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
+{
+  "target": "x86_64-unknown-linux-musl",
+  "musl": {
+    "repository": "https://git.musl-libc.org/git/musl",
+    "tag": "${{ steps.version_check.outputs.musl_tag }}",
+    "commit": "${{ steps.build_musl.outputs.musl_commit }}"
+  },
+  "mimalloc": {
+    "repository": "https://github.com/microsoft/mimalloc.git",
+    "tag": "${{ steps.version_check.outputs.mimalloc_tag }}",
+    "commit": "${{ steps.build_mimalloc.outputs.mimalloc_commit }}"
+  },
+  "release_tag": "${{ steps.version_check.outputs.release_tag }}",
+  "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
 
           echo "${{ steps.version_check.outputs.release_tag }}" > "$SYSROOT/version.txt"
           echo "Sysroot validation complete."
 
-      - name: Package Distribution Archive and Checksums
+      - name: Package Deterministic Archive and Compute Checksums
         if: steps.version_check.outputs.should_build == 'true'
         run: |
           mkdir -p release-assets
-          echo "Creating compressed sysroot archive: sysbuilts-x86_64.tar.xz..."
-          tar -cJf release-assets/sysbuilts-x86_64.tar.xz -C dist/sysroot .
+          echo "Creating deterministic compressed sysroot archive: sysbuilts-x86_64.tar.xz..."
+          tar --sort=name --mtime="2026-01-01 00:00:00Z" --owner=0 --group=0 --numeric-owner \
+              -cJf release-assets/sysbuilts-x86_64.tar.xz -C dist/sysroot .
 
           cd release-assets
           sha256sum sysbuilts-x86_64.tar.xz > SHA256SUMS.txt
-          echo "=== SHA256 Verification Sums ==="
+          echo "=== SHA-256 Integrity Checksums ==="
           cat SHA256SUMS.txt
           cd ..
 
@@ -220,19 +307,22 @@ jobs:
             Automated Sysbuilts (musl libc + mimalloc) sysroot for ARK-OS.
 
             - **Target Architecture:** `x86_64-unknown-linux-musl`
-            - **musl libc Version:** `${{ steps.version_check.outputs.musl_tag }}`
-            - **mimalloc Version:** `${{ steps.version_check.outputs.mimalloc_tag }}`
-            - **Dynamic Linker:** `/lib/ld-musl-x86_64.so.1`
+            - **musl libc Version:** `${{ steps.version_check.outputs.musl_tag }}` (`${{ steps.build_musl.outputs.musl_commit }}`)
+            - **mimalloc Version:** `${{ steps.version_check.outputs.mimalloc_tag }}` (`${{ steps.build_mimalloc.outputs.mimalloc_commit }}`)
+            - **Dynamic Linker Target Path:** `/lib/ld-musl-x86_64.so.1`
 
             ### Contents
 
-            - `include/`: musl C headers (`stdio.h`, `unistd.h`, etc.) and `mimalloc.h`
+            - `include/`: Standard musl C headers (`stdio.h`, `unistd.h`, etc.) and `mimalloc.h`
             - `lib/libc.a` & `lib/libc.so`: musl standard library and dynamic linker
             - `lib/crt1.o`, `crti.o`, `crtn.o`, `rcrt1.o`, `Scrt1.o`: ELF startup objects
-            - `lib/libmimalloc.a` & `lib/libmimalloc.so`: mimalloc high-performance allocator
-            - `bin/musl-gcc`: Spec-configured GCC wrapper targeting the sysroot
+            - `lib/libmimalloc.a` & `lib/libmimalloc.so`: mimalloc allocator libraries
+            - `lib/mimalloc.o`: Linkable override object
+            - `bin/musl-gcc`: Relocatable GCC wrapper targeting this sysroot
 
-            ### Checksum Verification
+            ### Integrity Verification
+
+            Verify the downloaded archive integrity via SHA-256 before extraction:
 
             ```bash
             sha256sum -c SHA256SUMS.txt
