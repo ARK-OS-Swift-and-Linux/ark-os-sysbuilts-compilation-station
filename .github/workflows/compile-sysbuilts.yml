@@ -113,6 +113,9 @@ jobs:
           [ ! -d "$SYSROOT/usr/include" ] && ln -sf ../include "$SYSROOT/usr/include"
           [ ! -d "$SYSROOT/usr/lib" ] && ln -sf ../lib "$SYSROOT/usr/lib"
 
+          # Replace absolute dynamic linker symlink (/lib/libc.so) with relative symlink
+          ln -sf libc.so "$SYSROOT/lib/ld-musl-x86_64.so.1"
+
           # Replace hardcoded musl-gcc wrapper with a relocatable wrapper
           echo "=== Creating relocatable musl-gcc wrapper ==="
           cat << 'EOF' > "$SYSROOT/bin/musl-gcc"
@@ -146,6 +149,16 @@ jobs:
 
           *link:
           -dynamic-linker /lib/ld-musl-x86_64.so.1 -nostdlib %{shared:-shared} %{static:-static} %{rdynamic:-export-dynamic}
+
+          *esp_link:
+
+
+          *esp_options:
+
+
+          *esp_cpp_options:
+
+
           SPECEOF
           fi
 
@@ -202,7 +215,7 @@ jobs:
           test -f "$SYSROOT/include/mimalloc.h" || { echo "Missing mimalloc.h"; exit 1; }
           test -f "$SYSROOT/lib/libc.a" || { echo "Missing libc.a"; exit 1; }
           test -f "$SYSROOT/lib/libc.so" || { echo "Missing libc.so"; exit 1; }
-          test -f "$SYSROOT/lib/ld-musl-x86_64.so.1" || { echo "Missing ld-musl-x86_64.so.1"; exit 1; }
+          test -e "$SYSROOT/lib/ld-musl-x86_64.so.1" || test -L "$SYSROOT/lib/ld-musl-x86_64.so.1" || { echo "Missing ld-musl-x86_64.so.1"; exit 1; }
           test -f "$SYSROOT/lib/crt1.o" || { echo "Missing crt1.o"; exit 1; }
           test -f "$SYSROOT/lib/libmimalloc.a" || { echo "Missing libmimalloc.a"; exit 1; }
           test -f "$SYSROOT/lib/libmimalloc.so" || { echo "Missing libmimalloc.so"; exit 1; }
